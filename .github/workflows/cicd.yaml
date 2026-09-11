@@ -1,38 +1,68 @@
-name: Build and push docker image.
+name: Build, push and deploy backend docker image
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: read
+      id-token: write
+
     steps:
-    - name: Check out the repository
-      uses: actions/checkout@v2
+      - name: Check out the repository
+        uses: actions/checkout@v4
 
-
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-# Login to ECR
-#=============
-    - name: Login to ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v2
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Docker build
+        run: |
+          docker build -t netflix_backend:latest .
 
-    - name: Docker build 
-      run: |
-        docker build -t netflix_backend:latest .
+      - name: Docker push
+        run: |
+          docker tag netflix_backend:latest 327573816781.dkr.ecr.us-east-2.amazonaws.com/movie-backend:v${GITHUB_RUN_NUMBER}
+          docker push 327573816781.dkr.ecr.us-east-2.amazonaws.com/movie-backend:v${GITHUB_RUN_NUMBER}
 
-    - name: Docker push
-      run: |
-        docker tag netflix_backend:latest 327573816781.dkr.ecr.us-east-2.amazonaws.com/movie-backend:v${GITHUB_RUN_NUMBER}
-        docker push 327573816781.dkr.ecr.us-east-2.amazonaws.com/movie-backend:v${GITHUB_RUN_NUMBER}
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-and-push
 
+    steps:
+      - name: Deploy backend to EC2
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: MONGODB_URI
+          script: |
+            set -e
+
+            /home/ubuntu/.local/bin/aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin 327573816781.dkr.ecr.us-east-2.amazonaws.com
+
+            docker pull 327573816781.dkr.ecr.us-east-2.amazonaws.com/movie-backend:v${{ github.run_number }}
+
+            docker stop movie-backend || true
+            docker rm movie-backend || true
+
+            docker run -d \
+              --name movie-backend \
+              --restart unless-stopped \
+              -p 8080:8080 \
+              -e MONGODB_URI="$MONGODB_URI" \
+              327573816781.dkr.ecr.us-east-2.amazonaws.com/movie-backend:v${{ github.run_number }}
